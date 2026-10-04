@@ -1,5 +1,10 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
+import 'package:http/http.dart' as http;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,12 +28,18 @@ class AppStore {
 
   List<WeightPlan> weightPlans = [];
   List<WorkoutDay> workoutDays = [];
+  DietGoals dietGoals = DietGoals.defaults();
+  List<DietLogEntry> dietLogs = [];
+  List<FoodDefinition> customFoods = [];
 
   Future<void> initialize() async {
     _box = await Hive.openBox('fitness_tracker_data');
 
     final savedWeightPlans = _box.get('weightPlans');
     final savedWorkoutDays = _box.get('workoutDays');
+    final savedDietGoals = _box.get('dietGoals');
+    final savedDietLogs = _box.get('dietLogs');
+    final savedCustomFoods = _box.get('customFoods');
 
     if (savedWeightPlans is List) {
       weightPlans = savedWeightPlans
@@ -44,6 +55,32 @@ class AppStore {
       workoutDays = savedWorkoutDays
           .map(
             (item) => WorkoutDay.fromJson(
+              Map<String, dynamic>.from(item as Map),
+            ),
+          )
+          .toList();
+    }
+
+    if (savedDietGoals is Map) {
+      dietGoals = DietGoals.fromJson(
+        Map<String, dynamic>.from(savedDietGoals),
+      );
+    }
+
+    if (savedDietLogs is List) {
+      dietLogs = savedDietLogs
+          .map(
+            (item) => DietLogEntry.fromJson(
+              Map<String, dynamic>.from(item as Map),
+            ),
+          )
+          .toList();
+    }
+
+    if (savedCustomFoods is List) {
+      customFoods = savedCustomFoods
+          .map(
+            (item) => FoodDefinition.fromJson(
               Map<String, dynamic>.from(item as Map),
             ),
           )
@@ -112,6 +149,21 @@ class AppStore {
     await _box.put(
       'workoutDays',
       workoutDays.map((e) => e.toJson()).toList(),
+    );
+
+    await _box.put(
+      'dietGoals',
+      dietGoals.toJson(),
+    );
+
+    await _box.put(
+      'dietLogs',
+      dietLogs.map((e) => e.toJson()).toList(),
+    );
+
+    await _box.put(
+      'customFoods',
+      customFoods.map((e) => e.toJson()).toList(),
     );
   }
 }
@@ -241,26 +293,42 @@ class ExerciseSetRecord {
   ExerciseSetRecord({
     required this.weightLb,
     required this.weightKg,
-    required this.reps,
+    this.reps = 0,
+    this.durationSeconds = 0,
+    this.trackingMode = 'reps',
+    this.inputUnit = 'lb',
   });
 
   double weightLb;
   double weightKg;
   int reps;
+  int durationSeconds;
+  String trackingMode;
+  String inputUnit;
 
   Map<String, dynamic> toJson() {
     return {
       'weightLb': weightLb,
       'weightKg': weightKg,
       'reps': reps,
+      'durationSeconds': durationSeconds,
+      'trackingMode': trackingMode,
+      'inputUnit': inputUnit,
     };
   }
 
   factory ExerciseSetRecord.fromJson(Map<String, dynamic> json) {
+    final duration = (json['durationSeconds'] as num?)?.toInt() ?? 0;
+    final mode = json['trackingMode'] as String? ??
+        (duration > 0 ? 'time' : 'reps');
+
     return ExerciseSetRecord(
       weightLb: (json['weightLb'] as num).toDouble(),
       weightKg: (json['weightKg'] as num).toDouble(),
-      reps: (json['reps'] as num).toInt(),
+      reps: (json['reps'] as num?)?.toInt() ?? 0,
+      durationSeconds: duration,
+      trackingMode: mode,
+      inputUnit: json['inputUnit'] as String? ?? 'lb',
     );
   }
 }
@@ -365,6 +433,326 @@ class WorkoutDay {
   }
 }
 
+
+// ============================================================
+// DIET MODELS + FOOD SEARCH
+// ============================================================
+
+class DietGoals {
+  DietGoals({
+    required this.calories,
+    required this.protein,
+    required this.carbs,
+    required this.fat,
+  });
+
+  double calories;
+  double protein;
+  double carbs;
+  double fat;
+
+  factory DietGoals.defaults() {
+    return DietGoals(
+      calories: 2400,
+      protein: 180,
+      carbs: 250,
+      fat: 70,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'calories': calories,
+      'protein': protein,
+      'carbs': carbs,
+      'fat': fat,
+    };
+  }
+
+  factory DietGoals.fromJson(Map<String, dynamic> json) {
+    return DietGoals(
+      calories: (json['calories'] as num?)?.toDouble() ?? 2400,
+      protein: (json['protein'] as num?)?.toDouble() ?? 180,
+      carbs: (json['carbs'] as num?)?.toDouble() ?? 250,
+      fat: (json['fat'] as num?)?.toDouble() ?? 70,
+    );
+  }
+}
+
+class FoodDefinition {
+  FoodDefinition({
+    required this.name,
+    required this.brand,
+    required this.servingLabel,
+    required this.calories,
+    required this.protein,
+    required this.carbs,
+    required this.fat,
+    required this.source,
+    this.barcode = '',
+    this.gramsPerServing,
+  });
+
+  String name;
+  String brand;
+  String servingLabel;
+  double calories;
+  double protein;
+  double carbs;
+  double fat;
+  String source;
+  String barcode;
+
+  // Optional weight represented by one nutrition serving. For Open Food
+  // Facts entries this is 100 g. Custom foods can also define this value.
+  // It lets the diary convert grams or a counted quantity into nutrition.
+  double? gramsPerServing;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'name': name,
+      'brand': brand,
+      'servingLabel': servingLabel,
+      'calories': calories,
+      'protein': protein,
+      'carbs': carbs,
+      'fat': fat,
+      'source': source,
+      'barcode': barcode,
+      'gramsPerServing': gramsPerServing,
+    };
+  }
+
+  factory FoodDefinition.fromJson(Map<String, dynamic> json) {
+    final servingLabel =
+        json['servingLabel'] as String? ?? '1 serving';
+    final savedGrams =
+        (json['gramsPerServing'] as num?)?.toDouble();
+
+    return FoodDefinition(
+      name: json['name'] as String? ?? 'Food',
+      brand: json['brand'] as String? ?? '',
+      servingLabel: servingLabel,
+      calories: (json['calories'] as num?)?.toDouble() ?? 0,
+      protein: (json['protein'] as num?)?.toDouble() ?? 0,
+      carbs: (json['carbs'] as num?)?.toDouble() ?? 0,
+      fat: (json['fat'] as num?)?.toDouble() ?? 0,
+      source: json['source'] as String? ?? 'Custom',
+      barcode: json['barcode'] as String? ?? '',
+      gramsPerServing:
+          savedGrams ?? gramsFromServingLabel(servingLabel),
+    );
+  }
+
+  FoodDefinition copy() {
+    return FoodDefinition.fromJson(toJson());
+  }
+}
+
+class DietLogEntry {
+  DietLogEntry({
+    required this.id,
+    required this.food,
+    required this.meal,
+    required this.dateTime,
+    required this.servings,
+    this.quantity,
+    this.quantityUnit,
+    this.gramsPerUnit,
+  });
+
+  String id;
+  FoodDefinition food;
+  String meal;
+  DateTime dateTime;
+
+  // Nutrition is always calculated with this multiplier so old saved entries
+  // remain compatible. Quantity fields are optional display/conversion data.
+  double servings;
+  double? quantity;
+  String? quantityUnit;
+  double? gramsPerUnit;
+
+  double get calories => food.calories * servings;
+  double get protein => food.protein * servings;
+  double get carbs => food.carbs * servings;
+  double get fat => food.fat * servings;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'food': food.toJson(),
+      'meal': meal,
+      'dateTime': dateTime.toIso8601String(),
+      'servings': servings,
+      'quantity': quantity,
+      'quantityUnit': quantityUnit,
+      'gramsPerUnit': gramsPerUnit,
+    };
+  }
+
+  factory DietLogEntry.fromJson(Map<String, dynamic> json) {
+    return DietLogEntry(
+      id: json['id'] as String? ??
+          DateTime.now().microsecondsSinceEpoch.toString(),
+      food: FoodDefinition.fromJson(
+        Map<String, dynamic>.from(
+          (json['food'] as Map?) ?? <String, dynamic>{},
+        ),
+      ),
+      meal: json['meal'] as String? ?? 'Snacks',
+      dateTime: DateTime.tryParse(
+            json['dateTime'] as String? ?? '',
+          ) ??
+          DateTime.now(),
+      servings: (json['servings'] as num?)?.toDouble() ?? 1,
+      quantity: (json['quantity'] as num?)?.toDouble(),
+      quantityUnit: json['quantityUnit'] as String?,
+      gramsPerUnit: (json['gramsPerUnit'] as num?)?.toDouble(),
+    );
+  }
+}
+
+class OpenFoodFactsService {
+  static double? _number(dynamic value) {
+    if (value is num) return value.toDouble();
+    if (value is String) return double.tryParse(value);
+    return null;
+  }
+
+  static Future<List<FoodDefinition>> search(String query) async {
+    final trimmed = query.trim();
+
+    if (trimmed.length < 2) {
+      return [];
+    }
+
+    final uri = Uri.https(
+      'world.openfoodfacts.org',
+      '/cgi/search.pl',
+      {
+        'search_terms': trimmed,
+        'search_simple': '1',
+        'action': 'process',
+        'json': '1',
+        'page_size': '25',
+        'fields': 'code,product_name,brands,nutriments',
+      },
+    );
+
+    final headers = <String, String>{
+      'Accept': 'application/json',
+    };
+
+    // Browsers do not allow apps to set the User-Agent header manually.
+    // Native iOS/Android builds can identify the app as requested by OFF.
+    if (!kIsWeb) {
+      headers['User-Agent'] =
+          'FitnessTracker/1.0 (com.legin.fitnesstracker)';
+    }
+
+    final response = await http
+        .get(
+          uri,
+          headers: headers,
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Food search failed (${response.statusCode}).',
+      );
+    }
+
+    final decoded = jsonDecode(response.body);
+
+    if (decoded is! Map) {
+      throw Exception('Unexpected food database response.');
+    }
+
+    final rawProducts = decoded['products'];
+
+    if (rawProducts is! List) {
+      return [];
+    }
+
+    final results = <FoodDefinition>[];
+    final seen = <String>{};
+
+    for (final raw in rawProducts) {
+      if (raw is! Map) continue;
+
+      final product = Map<String, dynamic>.from(raw);
+      final name =
+          (product['product_name']?.toString() ?? '').trim();
+
+      if (name.isEmpty) continue;
+
+      final nutrimentsRaw = product['nutriments'];
+      if (nutrimentsRaw is! Map) continue;
+
+      final nutriments =
+          Map<String, dynamic>.from(nutrimentsRaw);
+
+      double? calories =
+          _number(nutriments['energy-kcal_100g']);
+
+      if (calories == null) {
+        final energyKj =
+            _number(nutriments['energy-kj_100g']) ??
+                _number(nutriments['energy_100g']);
+
+        if (energyKj != null) {
+          calories = energyKj / 4.184;
+        }
+      }
+
+      final protein =
+          _number(nutriments['proteins_100g']) ?? 0;
+      final carbs =
+          _number(nutriments['carbohydrates_100g']) ?? 0;
+      final fat =
+          _number(nutriments['fat_100g']) ?? 0;
+
+      calories ??= 0;
+
+      if (calories <= 0 &&
+          protein <= 0 &&
+          carbs <= 0 &&
+          fat <= 0) {
+        continue;
+      }
+
+      final brand =
+          (product['brands']?.toString() ?? '').trim();
+      final barcode =
+          (product['code']?.toString() ?? '').trim();
+
+      final key =
+          '${name.toLowerCase()}|${brand.toLowerCase()}|$barcode';
+
+      if (!seen.add(key)) continue;
+
+      results.add(
+        FoodDefinition(
+          name: name,
+          brand: brand,
+          servingLabel: '100 g',
+          calories: calories,
+          protein: protein,
+          carbs: carbs,
+          fat: fat,
+          source: 'Open Food Facts',
+          barcode: barcode,
+          gramsPerServing: 100,
+        ),
+      );
+    }
+
+    return results;
+  }
+}
+
 // ============================================================
 // HOME
 // ============================================================
@@ -384,6 +772,7 @@ class _HomeScreenState extends State<HomeScreen> {
     const pages = [
       WeightPlansPage(),
       WorkoutDaysPage(),
+      DietPage(),
       SettingsPage(),
     ];
 
@@ -411,6 +800,11 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: Icon(Icons.fitness_center_outlined),
             selectedIcon: Icon(Icons.fitness_center),
             label: 'Workouts',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.restaurant_menu_outlined),
+            selectedIcon: Icon(Icons.restaurant_menu),
+            label: 'Diet',
           ),
           NavigationDestination(
             icon: Icon(Icons.settings_outlined),
@@ -680,6 +1074,15 @@ class _WeightPlanDetailPageState extends State<WeightPlanDetailPage> {
   }
 
   Future<void> deleteEntry(WeightEntry entry) async {
+    final confirmed = await confirmDelete(
+      context,
+      title: 'Delete weight entry?',
+      message:
+          'This will permanently delete this weigh-in and cannot be undone.',
+    );
+
+    if (!confirmed) return;
+
     setState(() {
       widget.plan.entries.remove(entry);
     });
@@ -1581,6 +1984,15 @@ class _WorkoutDayPageState extends State<WorkoutDayPage> {
   Future<void> deleteExercise(
     WorkoutExercise exercise,
   ) async {
+    final confirmed = await confirmDelete(
+      context,
+      title: 'Delete exercise?',
+      message:
+          'This will delete ${exercise.name} and all of its workout history.',
+    );
+
+    if (!confirmed) return;
+
     setState(() {
       widget.day.exercises.remove(exercise);
     });
@@ -1751,19 +2163,31 @@ class _ExerciseDetailPageState
         : set.weightKg;
   }
 
+  String sessionTrackingMode(ExerciseSession session) {
+    if (session.sets.isEmpty) return 'reps';
+    return session.sets.first.trackingMode;
+  }
+
   double sessionTopWeight(ExerciseSession session) {
-    if (session.sets.isEmpty) {
-      return 0;
-    }
+    if (session.sets.isEmpty) return 0;
 
     return session.sets
         .map(weightForSet)
         .reduce((a, b) => a > b ? a : b);
   }
 
-  double? heaviestWeight() {
-    final sets = widget.exercise.sessions
+  int sessionLongestHold(ExerciseSession session) {
+    if (session.sets.isEmpty) return 0;
+
+    return session.sets
+        .map((set) => set.durationSeconds)
+        .reduce((a, b) => a > b ? a : b);
+  }
+
+  double? heaviestWeight(List<ExerciseSession> sessions) {
+    final sets = sessions
         .expand((session) => session.sets)
+        .where((set) => set.trackingMode == 'reps')
         .toList();
 
     if (sets.isEmpty) return null;
@@ -1773,13 +2197,37 @@ class _ExerciseDetailPageState
         .reduce((a, b) => a > b ? a : b);
   }
 
+  int? longestHold(List<ExerciseSession> sessions) {
+    final sets = sessions
+        .expand((session) => session.sets)
+        .where((set) => set.trackingMode == 'time')
+        .toList();
+
+    if (sets.isEmpty) return null;
+
+    return sets
+        .map((set) => set.durationSeconds)
+        .reduce((a, b) => a > b ? a : b);
+  }
+
   Future<void> logWorkout() async {
+    final sorted =
+        List<ExerciseSession>.from(widget.exercise.sessions)
+          ..sort(
+            (a, b) => b.dateTime.compareTo(a.dateTime),
+          );
+
+    final initialMode = sorted.isEmpty
+        ? 'reps'
+        : sessionTrackingMode(sorted.first);
+
     final session =
         await Navigator.push<ExerciseSession>(
       context,
       MaterialPageRoute(
         builder: (_) => AddExerciseSessionPage(
           exerciseName: widget.exercise.name,
+          initialTrackingMode: initialMode,
         ),
       ),
     );
@@ -1793,9 +2241,48 @@ class _ExerciseDetailPageState
     }
   }
 
+  Future<void> editSession(
+    ExerciseSession session,
+  ) async {
+    final updated =
+        await Navigator.push<ExerciseSession>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AddExerciseSessionPage(
+          exerciseName: widget.exercise.name,
+          existingSession: session,
+          initialTrackingMode:
+              sessionTrackingMode(session),
+        ),
+      ),
+    );
+
+    if (updated == null) return;
+
+    final index =
+        widget.exercise.sessions.indexOf(session);
+
+    if (index == -1) return;
+
+    setState(() {
+      widget.exercise.sessions[index] = updated;
+    });
+
+    await AppStore.instance.save();
+  }
+
   Future<void> deleteSession(
     ExerciseSession session,
   ) async {
+    final confirmed = await confirmDelete(
+      context,
+      title: 'Delete workout entry?',
+      message:
+          'This will permanently delete this workout and all of its sets.',
+    );
+
+    if (!confirmed) return;
+
     setState(() {
       widget.exercise.sessions.remove(session);
     });
@@ -1814,22 +2301,38 @@ class _ExerciseDetailPageState
                 b.dateTime.compareTo(a.dateTime),
           );
 
-    final chronological =
+    final progressMode = sessions.isEmpty
+        ? 'reps'
+        : sessionTrackingMode(sessions.first);
+
+    final metricSessions =
         List<ExerciseSession>.from(
-          widget.exercise.sessions,
+          widget.exercise.sessions.where(
+            (session) =>
+                sessionTrackingMode(session) == progressMode,
+          ),
         )
           ..sort(
             (a, b) =>
                 a.dateTime.compareTo(b.dateTime),
           );
 
-    final heaviest = heaviestWeight();
+    final bestWeight =
+        heaviestWeight(metricSessions);
+    final bestHold =
+        longestHold(metricSessions);
 
     double? latestWeight;
+    int? latestHold;
 
     if (sessions.isNotEmpty) {
-      latestWeight =
-          sessionTopWeight(sessions.first);
+      final latest = sessions.first;
+
+      if (progressMode == 'time') {
+        latestHold = sessionLongestHold(latest);
+      } else {
+        latestWeight = sessionTopWeight(latest);
+      }
     }
 
     return Scaffold(
@@ -1881,19 +2384,31 @@ class _ExerciseDetailPageState
             children: [
               Expanded(
                 child: ProgressStatCard(
-                  title: 'Latest',
-                  value: latestWeight == null
-                      ? '—'
-                      : '${latestWeight.toStringAsFixed(1)} $displayUnit',
+                  title: progressMode == 'time'
+                      ? 'Latest Hold'
+                      : 'Latest',
+                  value: progressMode == 'time'
+                      ? (latestHold == null
+                          ? '—'
+                          : formatDurationSeconds(latestHold))
+                      : (latestWeight == null
+                          ? '—'
+                          : '${latestWeight.toStringAsFixed(1)} $displayUnit'),
                 ),
               ),
               const SizedBox(width: 10),
               Expanded(
                 child: ProgressStatCard(
-                  title: 'Heaviest',
-                  value: heaviest == null
-                      ? '—'
-                      : '${heaviest.toStringAsFixed(1)} $displayUnit',
+                  title: progressMode == 'time'
+                      ? 'Longest'
+                      : 'Heaviest',
+                  value: progressMode == 'time'
+                      ? (bestHold == null
+                          ? '—'
+                          : formatDurationSeconds(bestHold))
+                      : (bestWeight == null
+                          ? '—'
+                          : '${bestWeight.toStringAsFixed(1)} $displayUnit'),
                 ),
               ),
               const SizedBox(width: 10),
@@ -1917,9 +2432,11 @@ class _ExerciseDetailPageState
               crossAxisAlignment:
                   CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Heaviest Set Over Time',
-                  style: TextStyle(
+                Text(
+                  progressMode == 'time'
+                      ? 'Longest Hold Over Time'
+                      : 'Heaviest Set Over Time',
+                  style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                   ),
@@ -1928,7 +2445,7 @@ class _ExerciseDetailPageState
                 SizedBox(
                   height: 220,
                   width: double.infinity,
-                  child: chronological.isEmpty
+                  child: metricSessions.isEmpty
                       ? const Center(
                           child: Text(
                             'Log workouts to see progress.',
@@ -1940,8 +2457,9 @@ class _ExerciseDetailPageState
                       : CustomPaint(
                           painter:
                               ExerciseSessionChartPainter(
-                            sessions: chronological,
+                            sessions: metricSessions,
                             unit: displayUnit,
+                            metricMode: progressMode,
                           ),
                         ),
                 ),
@@ -1999,6 +2517,17 @@ class _ExerciseDetailPageState
                           ),
                         ),
                         IconButton(
+                          tooltip: 'Edit workout',
+                          onPressed: () {
+                            editSession(session);
+                          },
+                          icon: const Icon(
+                            Icons.edit_outlined,
+                            color: Color(0xFF0A84FF),
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Delete workout',
                           onPressed: () {
                             deleteSession(session);
                           },
@@ -2043,9 +2572,16 @@ class _ExerciseDetailPageState
                                   ),
                                 ),
                               ),
-                              Text(
-                                '${set.reps} reps',
-                              ),
+                              if (set.trackingMode == 'time')
+                                Text(
+                                  formatDurationSeconds(
+                                    set.durationSeconds,
+                                  ),
+                                )
+                              else
+                                Text(
+                                  '${set.reps} reps',
+                                ),
                             ],
                           ),
                         );
@@ -2073,16 +2609,20 @@ class _ExerciseDetailPageState
 }
 
 // ============================================================
-// ADD EXERCISE SESSION
+// ADD / EDIT EXERCISE SESSION
 // ============================================================
 
 class AddExerciseSessionPage extends StatefulWidget {
   const AddExerciseSessionPage({
     super.key,
     required this.exerciseName,
+    this.existingSession,
+    this.initialTrackingMode = 'reps',
   });
 
   final String exerciseName;
+  final ExerciseSession? existingSession;
+  final String initialTrackingMode;
 
   @override
   State<AddExerciseSessionPage> createState() =>
@@ -2092,32 +2632,94 @@ class AddExerciseSessionPage extends StatefulWidget {
 class _SetInput {
   _SetInput({
     String weight = '',
-    String reps = '',
+    String value = '',
   })  : weightController =
             TextEditingController(text: weight),
-        repsController =
-            TextEditingController(text: reps);
+        valueController =
+            TextEditingController(text: value);
 
   final TextEditingController weightController;
-  final TextEditingController repsController;
+  final TextEditingController valueController;
+
+  Timer? timer;
+  bool timerRunning = false;
+  int elapsedSeconds = 0;
+
+  void stopTimer() {
+    timer?.cancel();
+    timer = null;
+    timerRunning = false;
+  }
 
   void dispose() {
+    stopTimer();
     weightController.dispose();
-    repsController.dispose();
+    valueController.dispose();
   }
 }
 
 class _AddExerciseSessionPageState
     extends State<AddExerciseSessionPage> {
-  String unit = 'lb';
+  late String unit;
+  late String trackingMode;
+  late DateTime selectedDate;
+  late TextEditingController noteController;
+  late List<_SetInput> sets;
 
-  DateTime selectedDate = DateTime.now();
+  bool get isEditing => widget.existingSession != null;
 
-  final noteController = TextEditingController();
+  @override
+  void initState() {
+    super.initState();
 
-  final List<_SetInput> sets = [
-    _SetInput(),
-  ];
+    final existing = widget.existingSession;
+
+    selectedDate =
+        existing?.dateTime ?? DateTime.now();
+
+    noteController = TextEditingController(
+      text: existing?.note ?? '',
+    );
+
+    if (existing != null &&
+        existing.sets.isNotEmpty) {
+      trackingMode =
+          existing.sets.first.trackingMode;
+      unit = existing.sets.first.inputUnit;
+
+      sets = existing.sets.map(
+        (set) {
+          final displayWeight = unit == 'kg'
+              ? set.weightKg
+              : set.weightLb;
+
+          final value = trackingMode == 'time'
+              ? set.durationSeconds.toString()
+              : set.reps.toString();
+
+          final input = _SetInput(
+            weight:
+                displayWeight.toStringAsFixed(1),
+            value: value,
+          );
+
+          if (trackingMode == 'time') {
+            input.elapsedSeconds =
+                set.durationSeconds;
+          }
+
+          return input;
+        },
+      ).toList();
+    } else {
+      trackingMode =
+          widget.initialTrackingMode;
+      unit = 'lb';
+      sets = [
+        _SetInput(),
+      ];
+    }
+  }
 
   @override
   void dispose() {
@@ -2130,25 +2732,50 @@ class _AddExerciseSessionPageState
     super.dispose();
   }
 
+  void stopAllTimers() {
+    for (final set in sets) {
+      set.stopTimer();
+    }
+  }
+
+  void changeTrackingMode(String mode) {
+    if (trackingMode == mode) return;
+
+    stopAllTimers();
+
+    setState(() {
+      trackingMode = mode;
+
+      for (final set in sets) {
+        set.valueController.clear();
+        set.elapsedSeconds = 0;
+      }
+    });
+  }
+
   void addSet() {
     String previousWeight = '';
-    String previousReps = '';
+    String previousValue = '';
 
     if (sets.isNotEmpty) {
       previousWeight =
           sets.last.weightController.text;
-
-      previousReps =
-          sets.last.repsController.text;
+      previousValue =
+          sets.last.valueController.text;
     }
 
     setState(() {
-      sets.add(
-        _SetInput(
-          weight: previousWeight,
-          reps: previousReps,
-        ),
+      final input = _SetInput(
+        weight: previousWeight,
+        value: previousValue,
       );
+
+      if (trackingMode == 'time') {
+        input.elapsedSeconds =
+            int.tryParse(previousValue) ?? 0;
+      }
+
+      sets.add(input);
     });
   }
 
@@ -2156,10 +2783,53 @@ class _AddExerciseSessionPageState
     if (sets.length <= 1) return;
 
     final removed = sets.removeAt(index);
-
     removed.dispose();
 
     setState(() {});
+  }
+
+  void toggleTimer(int index) {
+    final input = sets[index];
+
+    if (input.timerRunning) {
+      input.stopTimer();
+      setState(() {});
+      return;
+    }
+
+    input.elapsedSeconds =
+        int.tryParse(
+          input.valueController.text,
+        ) ??
+        0;
+
+    input.timerRunning = true;
+
+    input.timer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (!mounted) return;
+
+        setState(() {
+          input.elapsedSeconds++;
+          input.valueController.text =
+              input.elapsedSeconds.toString();
+        });
+      },
+    );
+
+    setState(() {});
+  }
+
+  void resetTimer(int index) {
+    final input = sets[index];
+
+    input.stopTimer();
+
+    setState(() {
+      input.elapsedSeconds = 0;
+      input.valueController.text = '0';
+    });
   }
 
   Future<void> chooseDateTime() async {
@@ -2192,6 +2862,8 @@ class _AddExerciseSessionPageState
   }
 
   void saveWorkout() {
+    stopAllTimers();
+
     final completedSets =
         <ExerciseSetRecord>[];
 
@@ -2200,19 +2872,21 @@ class _AddExerciseSessionPageState
         input.weightController.text,
       );
 
-      final reps = int.tryParse(
-        input.repsController.text,
+      final trackedValue = int.tryParse(
+        input.valueController.text,
       );
 
       if (weight == null ||
           weight < 0 ||
-          reps == null ||
-          reps <= 0) {
+          trackedValue == null ||
+          trackedValue <= 0) {
         ScaffoldMessenger.of(context)
             .showSnackBar(
-          const SnackBar(
+          SnackBar(
             content: Text(
-              'Enter a valid weight and reps for every set.',
+              trackingMode == 'time'
+                  ? 'Enter a valid weight and time for every set.'
+                  : 'Enter a valid weight and reps for every set.',
             ),
           ),
         );
@@ -2235,7 +2909,15 @@ class _AddExerciseSessionPageState
         ExerciseSetRecord(
           weightLb: weightLb,
           weightKg: weightKg,
-          reps: reps,
+          reps: trackingMode == 'reps'
+              ? trackedValue
+              : 0,
+          durationSeconds:
+              trackingMode == 'time'
+                  ? trackedValue
+                  : 0,
+          trackingMode: trackingMode,
+          inputUnit: unit,
         ),
       );
     }
@@ -2254,14 +2936,20 @@ class _AddExerciseSessionPageState
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.exerciseName),
+        title: Text(
+          isEditing
+              ? 'Edit ${widget.exerciseName}'
+              : widget.exerciseName,
+        ),
       ),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          const Text(
-            'Log Workout',
-            style: TextStyle(
+          Text(
+            isEditing
+                ? 'Edit Workout'
+                : 'Log Workout',
+            style: const TextStyle(
               fontSize: 26,
               fontWeight: FontWeight.bold,
             ),
@@ -2288,6 +2976,34 @@ class _AddExerciseSessionPageState
             ),
             trailing: const Icon(Icons.edit),
             onTap: chooseDateTime,
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Track Sets By',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 10),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'reps',
+                icon: Icon(Icons.repeat),
+                label: Text('Reps'),
+              ),
+              ButtonSegment(
+                value: 'time',
+                icon: Icon(Icons.timer_outlined),
+                label: Text('Time'),
+              ),
+            ],
+            selected: {trackingMode},
+            onSelectionChanged: (selection) {
+              changeTrackingMode(
+                selection.first,
+              );
+            },
           ),
           const SizedBox(height: 20),
           const Text(
@@ -2350,60 +3066,133 @@ class _AddExerciseSessionPageState
                   borderRadius:
                       BorderRadius.circular(16),
                 ),
-                child: Row(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.center,
+                child: Column(
                   children: [
-                    SizedBox(
-                      width: 44,
-                      child: Text(
-                        '${index + 1}',
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight:
-                              FontWeight.bold,
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Set ${index + 1}',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight:
+                                  FontWeight.bold,
+                            ),
+                          ),
                         ),
-                      ),
+                        if (sets.length > 1)
+                          IconButton(
+                            tooltip: 'Remove set',
+                            onPressed: () {
+                              removeSet(index);
+                            },
+                            icon: const Icon(
+                              Icons.close,
+                              color: Colors.redAccent,
+                            ),
+                          ),
+                      ],
                     ),
-                    Expanded(
-                      child: TextField(
-                        controller:
-                            set.weightController,
-                        keyboardType:
-                            const TextInputType
-                                .numberWithOptions(
-                          decimal: true,
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller:
+                                set.weightController,
+                            keyboardType:
+                                const TextInputType
+                                    .numberWithOptions(
+                              decimal: true,
+                            ),
+                            decoration:
+                                InputDecoration(
+                              labelText:
+                                  'Weight ($unit)',
+                            ),
+                          ),
                         ),
-                        decoration:
-                            InputDecoration(
-                          labelText:
-                              'Weight ($unit)',
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller:
+                                set.valueController,
+                            keyboardType:
+                                TextInputType.number,
+                            decoration:
+                                InputDecoration(
+                              labelText:
+                                  trackingMode ==
+                                          'time'
+                                      ? 'Seconds'
+                                      : 'Reps',
+                            ),
+                          ),
                         ),
-                      ),
+                      ],
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: TextField(
-                        controller:
-                            set.repsController,
-                        keyboardType:
-                            TextInputType.number,
-                        decoration:
-                            const InputDecoration(
-                          labelText: 'Reps',
-                        ),
+                    if (trackingMode == 'time') ...[
+                      const SizedBox(height: 12),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Container(
+                              padding:
+                                  const EdgeInsets.symmetric(
+                                vertical: 12,
+                                horizontal: 14,
+                              ),
+                              decoration:
+                                  BoxDecoration(
+                                color: const Color(
+                                  0xFF11151A,
+                                ),
+                                borderRadius:
+                                    BorderRadius.circular(
+                                  12,
+                                ),
+                              ),
+                              child: Text(
+                                formatStopwatch(
+                                  set.elapsedSeconds,
+                                ),
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          FilledButton.icon(
+                            onPressed: () {
+                              toggleTimer(index);
+                            },
+                            icon: Icon(
+                              set.timerRunning
+                                  ? Icons.pause
+                                  : Icons.play_arrow,
+                            ),
+                            label: Text(
+                              set.timerRunning
+                                  ? 'Stop'
+                                  : 'Start',
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          IconButton.outlined(
+                            tooltip: 'Reset timer',
+                            onPressed: () {
+                              resetTimer(index);
+                            },
+                            icon: const Icon(
+                              Icons.restart_alt,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    if (sets.length > 1)
-                      IconButton(
-                        onPressed: () {
-                          removeSet(index);
-                        },
-                        icon: const Icon(
-                          Icons.close,
-                          color: Colors.redAccent,
-                        ),
-                      ),
+                    ],
                   ],
                 ),
               );
@@ -2427,11 +3216,18 @@ class _AddExerciseSessionPageState
           const SizedBox(height: 24),
           FilledButton.icon(
             onPressed: saveWorkout,
-            icon: const Icon(Icons.save),
-            label: const Padding(
-              padding: EdgeInsets.all(14),
+            icon: Icon(
+              isEditing
+                  ? Icons.check
+                  : Icons.save,
+            ),
+            label: Padding(
+              padding:
+                  const EdgeInsets.all(14),
               child: Text(
-                'Save Workout',
+                isEditing
+                    ? 'Save Changes'
+                    : 'Save Workout',
               ),
             ),
           ),
@@ -2451,10 +3247,12 @@ class ExerciseSessionChartPainter
   ExerciseSessionChartPainter({
     required this.sessions,
     required this.unit,
+    required this.metricMode,
   });
 
   final List<ExerciseSession> sessions;
   final String unit;
+  final String metricMode;
 
   double weight(ExerciseSetRecord set) {
     return unit == 'lb'
@@ -2462,9 +3260,18 @@ class ExerciseSessionChartPainter
         : set.weightKg;
   }
 
-  double sessionMax(ExerciseSession session) {
+  double sessionValue(ExerciseSession session) {
     if (session.sets.isEmpty) {
       return 0;
+    }
+
+    if (metricMode == 'time') {
+      return session.sets
+          .map(
+            (set) =>
+                set.durationSeconds.toDouble(),
+          )
+          .reduce((a, b) => a > b ? a : b);
     }
 
     return session.sets
@@ -2477,7 +3284,7 @@ class ExerciseSessionChartPainter
     if (sessions.isEmpty) return;
 
     final values =
-        sessions.map(sessionMax).toList();
+        sessions.map(sessionValue).toList();
 
     double min = values.reduce(
       (a, b) => a < b ? a : b,
@@ -2488,8 +3295,12 @@ class ExerciseSessionChartPainter
     );
 
     if (min == max) {
-      min -= 5;
-      max += 5;
+      final extra = metricMode == 'time'
+          ? 10.0
+          : 5.0;
+
+      min -= extra;
+      max += extra;
     }
 
     const padding = 20.0;
@@ -2592,6 +3403,1930 @@ class ExerciseSessionChartPainter
     return true;
   }
 }
+
+
+// ============================================================
+// DIET
+// ============================================================
+
+class DietPage extends StatefulWidget {
+  const DietPage({super.key});
+
+  @override
+  State<DietPage> createState() => _DietPageState();
+}
+
+class _DietPageState extends State<DietPage> {
+  static const meals = [
+    'Breakfast',
+    'Lunch',
+    'Dinner',
+    'Snacks',
+  ];
+
+  DateTime selectedDate = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    DateTime.now().day,
+  );
+
+  List<DietLogEntry> get dayEntries {
+    final entries = AppStore.instance.dietLogs
+        .where(
+          (entry) => sameCalendarDay(
+            entry.dateTime,
+            selectedDate,
+          ),
+        )
+        .toList()
+      ..sort(
+        (a, b) => a.dateTime.compareTo(b.dateTime),
+      );
+
+    return entries;
+  }
+
+  Future<void> addFood(String meal) async {
+    final entry = await Navigator.push<DietLogEntry>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FoodPickerPage(
+          meal: meal,
+          selectedDate: selectedDate,
+        ),
+      ),
+    );
+
+    if (entry == null) return;
+
+    setState(() {
+      AppStore.instance.dietLogs.add(entry);
+    });
+
+    await AppStore.instance.save();
+  }
+
+  Future<void> editFood(DietLogEntry entry) async {
+    final updated = await Navigator.push<DietLogEntry>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FoodAmountPage(
+          food: entry.food,
+          initialMeal: entry.meal,
+          selectedDate: entry.dateTime,
+          existingEntry: entry,
+        ),
+      ),
+    );
+
+    if (updated == null) return;
+
+    final index = AppStore.instance.dietLogs.indexWhere(
+      (item) => item.id == entry.id,
+    );
+
+    if (index == -1) return;
+
+    setState(() {
+      AppStore.instance.dietLogs[index] = updated;
+    });
+
+    await AppStore.instance.save();
+  }
+
+  Future<void> deleteFood(DietLogEntry entry) async {
+    final confirmed = await confirmDelete(
+      context,
+      title: 'Delete food entry?',
+      message:
+          'This will permanently remove ${entry.food.name} from this day.',
+    );
+
+    if (!confirmed) return;
+
+    setState(() {
+      AppStore.instance.dietLogs.removeWhere(
+        (item) => item.id == entry.id,
+      );
+    });
+
+    await AppStore.instance.save();
+  }
+
+  Future<void> editGoals() async {
+    final current = AppStore.instance.dietGoals;
+
+    final caloriesController = TextEditingController(
+      text: current.calories.toStringAsFixed(0),
+    );
+    final proteinController = TextEditingController(
+      text: current.protein.toStringAsFixed(0),
+    );
+    final carbsController = TextEditingController(
+      text: current.carbs.toStringAsFixed(0),
+    );
+    final fatController = TextEditingController(
+      text: current.fat.toStringAsFixed(0),
+    );
+
+    final result = await showDialog<DietGoals>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF171B20),
+          title: const Text('Daily Diet Goals'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: caloriesController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Calories',
+                    suffixText: 'kcal',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: proteinController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Protein',
+                    suffixText: 'g',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: carbsController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Carbs',
+                    suffixText: 'g',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: fatController,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  decoration: const InputDecoration(
+                    labelText: 'Fat',
+                    suffixText: 'g',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final calories =
+                    double.tryParse(caloriesController.text);
+                final protein =
+                    double.tryParse(proteinController.text);
+                final carbs =
+                    double.tryParse(carbsController.text);
+                final fat =
+                    double.tryParse(fatController.text);
+
+                if (calories == null ||
+                    calories <= 0 ||
+                    protein == null ||
+                    protein < 0 ||
+                    carbs == null ||
+                    carbs < 0 ||
+                    fat == null ||
+                    fat < 0) {
+                  return;
+                }
+
+                Navigator.pop(
+                  context,
+                  DietGoals(
+                    calories: calories,
+                    protein: protein,
+                    carbs: carbs,
+                    fat: fat,
+                  ),
+                );
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
+    );
+
+    caloriesController.dispose();
+    proteinController.dispose();
+    carbsController.dispose();
+    fatController.dispose();
+
+    if (result == null) return;
+
+    setState(() {
+      AppStore.instance.dietGoals = result;
+    });
+
+    await AppStore.instance.save();
+  }
+
+  Future<void> pickDate() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: selectedDate,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+
+    if (date == null) return;
+
+    setState(() {
+      selectedDate = DateTime(
+        date.year,
+        date.month,
+        date.day,
+      );
+    });
+  }
+
+  void moveDay(int amount) {
+    setState(() {
+      selectedDate = selectedDate.add(
+        Duration(days: amount),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final goals = AppStore.instance.dietGoals;
+    final entries = dayEntries;
+
+    final calories = entries.fold<double>(
+      0,
+      (sum, entry) => sum + entry.calories,
+    );
+    final protein = entries.fold<double>(
+      0,
+      (sum, entry) => sum + entry.protein,
+    );
+    final carbs = entries.fold<double>(
+      0,
+      (sum, entry) => sum + entry.carbs,
+    );
+    final fat = entries.fold<double>(
+      0,
+      (sum, entry) => sum + entry.fat,
+    );
+
+    final remaining = goals.calories - calories;
+
+    return SafeArea(
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          90,
+        ),
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Diet',
+                  style: TextStyle(
+                    fontSize: 30,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: 'Daily goals',
+                onPressed: editGoals,
+                icon: const Icon(Icons.tune),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: 8,
+              vertical: 4,
+            ),
+            decoration: BoxDecoration(
+              color: const Color(0xFF171B20),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                IconButton(
+                  tooltip: 'Previous day',
+                  onPressed: () => moveDay(-1),
+                  icon: const Icon(Icons.chevron_left),
+                ),
+                Expanded(
+                  child: TextButton.icon(
+                    onPressed: pickDate,
+                    icon: const Icon(
+                      Icons.calendar_today_outlined,
+                      size: 18,
+                    ),
+                    label: Text(
+                      dietDateLabel(selectedDate),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Next day',
+                  onPressed: () => moveDay(1),
+                  icon: const Icon(Icons.chevron_right),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 18),
+          Container(
+            padding: const EdgeInsets.all(18),
+            decoration: BoxDecoration(
+              color: const Color(0xFF171B20),
+              borderRadius: BorderRadius.circular(18),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment:
+                      CrossAxisAlignment.end,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment:
+                            CrossAxisAlignment.start,
+                        children: [
+                          const Text(
+                            'Calories',
+                            style: TextStyle(
+                              color: Colors.grey,
+                              fontSize: 13,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '${calories.toStringAsFixed(0)} / ${goals.calories.toStringAsFixed(0)} kcal',
+                            style: const TextStyle(
+                              fontSize: 25,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      remaining >= 0
+                          ? '${remaining.toStringAsFixed(0)} left'
+                          : '${(-remaining).toStringAsFixed(0)} over',
+                      style: TextStyle(
+                        color: remaining >= 0
+                            ? Colors.white70
+                            : Colors.orangeAccent,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                LinearProgressIndicator(
+                  value: progressValue(
+                    calories,
+                    goals.calories,
+                  ),
+                  minHeight: 9,
+                  borderRadius: BorderRadius.circular(20),
+                  backgroundColor:
+                      Colors.white.withOpacity(0.08),
+                ),
+                const SizedBox(height: 18),
+                MacroProgressRow(
+                  name: 'Protein',
+                  current: protein,
+                  target: goals.protein,
+                  suffix: 'g',
+                ),
+                const SizedBox(height: 12),
+                MacroProgressRow(
+                  name: 'Carbs',
+                  current: carbs,
+                  target: goals.carbs,
+                  suffix: 'g',
+                ),
+                const SizedBox(height: 12),
+                MacroProgressRow(
+                  name: 'Fat',
+                  current: fat,
+                  target: goals.fat,
+                  suffix: 'g',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 22),
+          ...meals.map(
+            (meal) {
+              final mealEntries = entries
+                  .where(
+                    (entry) => entry.meal == meal,
+                  )
+                  .toList();
+
+              final mealCalories =
+                  mealEntries.fold<double>(
+                0,
+                (sum, entry) =>
+                    sum + entry.calories,
+              );
+
+              return Padding(
+                padding:
+                    const EdgeInsets.only(bottom: 14),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF171B20),
+                    borderRadius:
+                        BorderRadius.circular(18),
+                  ),
+                  child: Column(
+                    children: [
+                      Padding(
+                        padding:
+                            const EdgeInsets.fromLTRB(
+                          16,
+                          14,
+                          10,
+                          8,
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                meal,
+                                style: const TextStyle(
+                                  fontSize: 19,
+                                  fontWeight:
+                                      FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '${mealCalories.toStringAsFixed(0)} kcal',
+                              style: const TextStyle(
+                                color: Colors.white70,
+                              ),
+                            ),
+                            const SizedBox(width: 4),
+                            IconButton(
+                              tooltip: 'Add food',
+                              onPressed: () {
+                                addFood(meal);
+                              },
+                              icon: const Icon(
+                                Icons.add_circle_outline,
+                                color:
+                                    Color(0xFF0A84FF),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      if (mealEntries.isEmpty)
+                        Padding(
+                          padding:
+                              const EdgeInsets.fromLTRB(
+                            16,
+                            0,
+                            16,
+                            16,
+                          ),
+                          child: Align(
+                            alignment:
+                                Alignment.centerLeft,
+                            child: TextButton.icon(
+                              onPressed: () {
+                                addFood(meal);
+                              },
+                              icon:
+                                  const Icon(Icons.add),
+                              label:
+                                  const Text('Add Food'),
+                            ),
+                          ),
+                        )
+                      else
+                        ...mealEntries.map(
+                          (entry) {
+                            return Column(
+                              children: [
+                                const Divider(
+                                  height: 1,
+                                ),
+                                ListTile(
+                                  onTap: () {
+                                    editFood(entry);
+                                  },
+                                  title: Text(
+                                    entry.food.name,
+                                    maxLines: 1,
+                                    overflow: TextOverflow
+                                        .ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    foodEntrySubtitle(
+                                      entry,
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow
+                                        .ellipsis,
+                                  ),
+                                  trailing: Row(
+                                    mainAxisSize:
+                                        MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        '${entry.calories.toStringAsFixed(0)} kcal',
+                                        style:
+                                            const TextStyle(
+                                          fontWeight:
+                                              FontWeight
+                                                  .bold,
+                                        ),
+                                      ),
+                                      PopupMenuButton<
+                                          String>(
+                                        onSelected:
+                                            (value) {
+                                          if (value ==
+                                              'edit') {
+                                            editFood(
+                                                entry);
+                                          } else if (value ==
+                                              'delete') {
+                                            deleteFood(
+                                                entry);
+                                          }
+                                        },
+                                        itemBuilder:
+                                            (context) => const [
+                                          PopupMenuItem(
+                                            value:
+                                                'edit',
+                                            child: Row(
+                                              children: [
+                                                Icon(Icons
+                                                    .edit_outlined),
+                                                SizedBox(
+                                                    width:
+                                                        10),
+                                                Text(
+                                                    'Edit'),
+                                              ],
+                                            ),
+                                          ),
+                                          PopupMenuItem(
+                                            value:
+                                                'delete',
+                                            child: Row(
+                                              children: [
+                                                Icon(
+                                                  Icons
+                                                      .delete_outline,
+                                                  color: Colors
+                                                      .redAccent,
+                                                ),
+                                                SizedBox(
+                                                    width:
+                                                        10),
+                                                Text(
+                                                  'Delete',
+                                                  style:
+                                                      TextStyle(
+                                                    color: Colors
+                                                        .redAccent,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+          const SizedBox(height: 4),
+          const Center(
+            child: Text(
+              'Food search powered by Open Food Facts',
+              style: TextStyle(
+                color: Colors.grey,
+                fontSize: 11,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// DIET - FOOD PICKER
+// ============================================================
+
+class FoodPickerPage extends StatefulWidget {
+  const FoodPickerPage({
+    super.key,
+    required this.meal,
+    required this.selectedDate,
+  });
+
+  final String meal;
+  final DateTime selectedDate;
+
+  @override
+  State<FoodPickerPage> createState() =>
+      _FoodPickerPageState();
+}
+
+class _FoodPickerPageState
+    extends State<FoodPickerPage> {
+  final searchController = TextEditingController();
+
+  bool searching = false;
+  String searchMessage = '';
+  List<FoodDefinition> searchResults = [];
+
+  @override
+  void dispose() {
+    searchController.dispose();
+    super.dispose();
+  }
+
+  List<FoodDefinition> recentFoods() {
+    final logs =
+        List<DietLogEntry>.from(
+          AppStore.instance.dietLogs,
+        )
+          ..sort(
+            (a, b) =>
+                b.dateTime.compareTo(a.dateTime),
+          );
+
+    final result = <FoodDefinition>[];
+    final seen = <String>{};
+
+    for (final log in logs) {
+      final food = log.food;
+      final key =
+          '${food.name.toLowerCase()}|${food.brand.toLowerCase()}|${food.servingLabel.toLowerCase()}';
+
+      if (!seen.add(key)) continue;
+
+      result.add(food.copy());
+
+      if (result.length >= 30) break;
+    }
+
+    return result;
+  }
+
+  Future<void> search() async {
+    final query = searchController.text.trim();
+
+    if (query.length < 2) {
+      setState(() {
+        searchResults = [];
+        searchMessage =
+            'Type at least 2 characters.';
+      });
+      return;
+    }
+
+    FocusScope.of(context).unfocus();
+
+    setState(() {
+      searching = true;
+      searchMessage = '';
+      searchResults = [];
+    });
+
+    try {
+      final results =
+          await OpenFoodFactsService.search(query);
+
+      if (!mounted) return;
+
+      setState(() {
+        searchResults = results;
+        searchMessage = results.isEmpty
+            ? 'No foods found. Try another search or add a custom food.'
+            : '';
+      });
+    } catch (error) {
+      if (!mounted) return;
+
+      setState(() {
+        searchMessage =
+            'Could not search the food database. Check your internet connection and try again.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          searching = false;
+        });
+      }
+    }
+  }
+
+  Future<void> selectFood(
+    FoodDefinition food,
+  ) async {
+    final entry =
+        await Navigator.push<DietLogEntry>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => FoodAmountPage(
+          food: food,
+          initialMeal: widget.meal,
+          selectedDate: widget.selectedDate,
+        ),
+      ),
+    );
+
+    if (entry == null || !mounted) return;
+
+    Navigator.pop(context, entry);
+  }
+
+  Future<void> createCustomFood() async {
+    final food =
+        await Navigator.push<FoodDefinition>(
+      context,
+      MaterialPageRoute(
+        builder: (_) =>
+            const CreateCustomFoodPage(),
+      ),
+    );
+
+    if (food == null) return;
+
+    AppStore.instance.customFoods.add(food);
+    await AppStore.instance.save();
+
+    if (!mounted) return;
+
+    setState(() {});
+
+    await selectFood(food);
+  }
+
+  Future<void> deleteCustomFood(
+    FoodDefinition food,
+  ) async {
+    final confirmed = await confirmDelete(
+      context,
+      title: 'Delete custom food?',
+      message:
+          'This removes ${food.name} from your custom foods. Existing diary entries will stay saved.',
+    );
+
+    if (!confirmed) return;
+
+    setState(() {
+      AppStore.instance.customFoods.remove(food);
+    });
+
+    await AppStore.instance.save();
+  }
+
+  Widget foodTile(FoodDefinition food) {
+    return ListTile(
+      onTap: () => selectFood(food),
+      title: Text(
+        food.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        [
+          if (food.brand.isNotEmpty) food.brand,
+          '${food.calories.toStringAsFixed(0)} kcal • P ${food.protein.toStringAsFixed(1)}g • C ${food.carbs.toStringAsFixed(1)}g • F ${food.fat.toStringAsFixed(1)}g',
+          'per ${food.servingLabel}',
+        ].join('\n'),
+        maxLines: 3,
+        overflow: TextOverflow.ellipsis,
+      ),
+      isThreeLine: true,
+      trailing: const Icon(
+        Icons.chevron_right,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final recent = recentFoods();
+    final custom =
+        AppStore.instance.customFoods;
+
+    return DefaultTabController(
+      length: 3,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text('Add to ${widget.meal}'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(
+                icon: Icon(Icons.search),
+                text: 'Search',
+              ),
+              Tab(
+                icon: Icon(Icons.history),
+                text: 'Recent',
+              ),
+              Tab(
+                icon: Icon(Icons.bookmark_outline),
+                text: 'Custom',
+              ),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller:
+                              searchController,
+                          autofocus: true,
+                          textInputAction:
+                              TextInputAction.search,
+                          onSubmitted: (_) =>
+                              search(),
+                          decoration:
+                              const InputDecoration(
+                            labelText:
+                                'Search foods',
+                            hintText:
+                                'Greek yogurt, chicken breast...',
+                            prefixIcon:
+                                Icon(Icons.search),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      FilledButton(
+                        onPressed:
+                            searching ? null : search,
+                        child: searching
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child:
+                                    CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Text('Search'),
+                      ),
+                    ],
+                  ),
+                ),
+                if (searchMessage.isNotEmpty)
+                  Padding(
+                    padding:
+                        const EdgeInsets.fromLTRB(
+                      20,
+                      4,
+                      20,
+                      12,
+                    ),
+                    child: Text(
+                      searchMessage,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                Expanded(
+                  child: searchResults.isEmpty
+                      ? Center(
+                          child: Padding(
+                            padding:
+                                const EdgeInsets.all(
+                              30,
+                            ),
+                            child: Text(
+                              searching
+                                  ? 'Searching...'
+                                  : 'Search the Open Food Facts database, or use the Custom tab to add your own food.',
+                              textAlign:
+                                  TextAlign.center,
+                              style:
+                                  const TextStyle(
+                                color: Colors.grey,
+                              ),
+                            ),
+                          ),
+                        )
+                      : ListView.separated(
+                          itemCount:
+                              searchResults.length,
+                          separatorBuilder:
+                              (_, __) =>
+                                  const Divider(
+                            height: 1,
+                          ),
+                          itemBuilder:
+                              (context, index) {
+                            return foodTile(
+                              searchResults[index],
+                            );
+                          },
+                        ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text(
+                    'Nutrition data is community-maintained. Check the product label when accuracy matters.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Colors.grey,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            recent.isEmpty
+                ? const Center(
+                    child: Text(
+                      'Foods you log will appear here.',
+                      style: TextStyle(
+                        color: Colors.grey,
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    itemCount: recent.length,
+                    separatorBuilder: (_, __) =>
+                        const Divider(height: 1),
+                    itemBuilder:
+                        (context, index) {
+                      return foodTile(
+                        recent[index],
+                      );
+                    },
+                  ),
+            Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed:
+                          createCustomFood,
+                      icon: const Icon(Icons.add),
+                      label: const Text(
+                        'Create Custom Food',
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: custom.isEmpty
+                      ? const Center(
+                          child: Text(
+                            'No custom foods yet.',
+                            style: TextStyle(
+                              color: Colors.grey,
+                            ),
+                          ),
+                        )
+                      : ListView.separated(
+                          itemCount:
+                              custom.length,
+                          separatorBuilder:
+                              (_, __) =>
+                                  const Divider(
+                            height: 1,
+                          ),
+                          itemBuilder:
+                              (context, index) {
+                            final food =
+                                custom[index];
+
+                            return ListTile(
+                              onTap: () {
+                                selectFood(food);
+                              },
+                              title: Text(
+                                food.name,
+                              ),
+                              subtitle: Text(
+                                '${food.calories.toStringAsFixed(0)} kcal • ${food.servingLabel}',
+                              ),
+                              trailing: Row(
+                                mainAxisSize:
+                                    MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons
+                                        .chevron_right,
+                                  ),
+                                  IconButton(
+                                    tooltip:
+                                        'Delete custom food',
+                                    onPressed: () {
+                                      deleteCustomFood(
+                                        food,
+                                      );
+                                    },
+                                    icon:
+                                        const Icon(
+                                      Icons
+                                          .delete_outline,
+                                      color: Colors
+                                          .redAccent,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================
+// DIET - FOOD AMOUNT / EDIT ENTRY
+// ============================================================
+
+class FoodAmountPage extends StatefulWidget {
+  const FoodAmountPage({
+    super.key,
+    required this.food,
+    required this.initialMeal,
+    required this.selectedDate,
+    this.existingEntry,
+  });
+
+  final FoodDefinition food;
+  final String initialMeal;
+  final DateTime selectedDate;
+  final DietLogEntry? existingEntry;
+
+  @override
+  State<FoodAmountPage> createState() =>
+      _FoodAmountPageState();
+}
+
+class _FoodAmountPageState extends State<FoodAmountPage> {
+  late TextEditingController amountController;
+  late TextEditingController gramsPerUnitController;
+  late String meal;
+  late DateTime dateTime;
+  late String amountMode;
+  late String quantityUnit;
+
+  static const quantityUnits = <String>[
+    'item',
+    'egg',
+    'slice',
+    'piece',
+    'bar',
+    'scoop',
+    'bottle',
+    'can',
+    'packet',
+    'cup',
+    'tbsp',
+    'tsp',
+    'oz',
+    'mL',
+  ];
+
+  bool get isEditing => widget.existingEntry != null;
+  bool get canUseWeightConversion =>
+      widget.food.gramsPerServing != null &&
+      widget.food.gramsPerServing! > 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    meal = widget.existingEntry?.meal ?? widget.initialMeal;
+
+    final existing = widget.existingEntry;
+
+    if (existing?.quantity != null &&
+        existing?.quantityUnit != null) {
+      if (existing!.quantityUnit == 'g') {
+        amountMode = 'Grams';
+        quantityUnit = 'item';
+      } else {
+        amountMode = 'Quantity';
+        quantityUnit = existing.quantityUnit!;
+      }
+
+      amountController = TextEditingController(
+        text: trimDouble(existing.quantity!),
+      );
+
+      gramsPerUnitController = TextEditingController(
+        text: existing.gramsPerUnit == null
+            ? suggestedGramsPerUnit(widget.food).toStringAsFixed(0)
+            : trimDouble(existing.gramsPerUnit!),
+      );
+    } else {
+      // Keep older saved entries in their original Servings mode. New
+      // countable foods such as eggs can open in Quantity mode automatically.
+      final suggestion = existing == null
+          ? suggestedQuantityUnit(widget.food)
+          : null;
+
+      amountMode = suggestion == null ? 'Servings' : 'Quantity';
+      quantityUnit = suggestion ?? 'item';
+
+      amountController = TextEditingController(
+        text: existing == null ? '1' : trimDouble(existing.servings),
+      );
+
+      gramsPerUnitController = TextEditingController(
+        text: suggestion == null
+            ? ''
+            : trimDouble(suggestedGramsPerUnit(widget.food)),
+      );
+    }
+
+    if (widget.existingEntry != null) {
+      dateTime = widget.existingEntry!.dateTime;
+    } else {
+      final now = DateTime.now();
+      dateTime = DateTime(
+        widget.selectedDate.year,
+        widget.selectedDate.month,
+        widget.selectedDate.day,
+        now.hour,
+        now.minute,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    amountController.dispose();
+    gramsPerUnitController.dispose();
+    super.dispose();
+  }
+
+  double get amount =>
+      double.tryParse(amountController.text.trim()) ?? 0;
+
+  double get gramsPerUnit =>
+      double.tryParse(gramsPerUnitController.text.trim()) ?? 0;
+
+  double get nutritionMultiplier {
+    if (amountMode == 'Servings') {
+      return amount;
+    }
+
+    final baseGrams = widget.food.gramsPerServing;
+    if (baseGrams == null || baseGrams <= 0) return 0;
+
+    if (amountMode == 'Grams') {
+      return amount / baseGrams;
+    }
+
+    return (amount * gramsPerUnit) / baseGrams;
+  }
+
+  double get totalGrams {
+    if (amountMode == 'Grams') return amount;
+    if (amountMode == 'Quantity') return amount * gramsPerUnit;
+
+    final base = widget.food.gramsPerServing;
+    return base == null ? 0 : amount * base;
+  }
+
+  Future<void> chooseDate() async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: dateTime,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+
+    if (date == null) return;
+
+    setState(() {
+      dateTime = DateTime(
+        date.year,
+        date.month,
+        date.day,
+        dateTime.hour,
+        dateTime.minute,
+      );
+    });
+  }
+
+  void setAmount(double value) {
+    setState(() {
+      amountController.text = trimDouble(value);
+    });
+  }
+
+  void setMode(String mode) {
+    if (mode != 'Servings' && !canUseWeightConversion) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'This food needs a serving weight before Quantity or Grams can be used. Create a custom food and add a serving weight.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      amountMode = mode;
+
+      if (mode == 'Quantity' && gramsPerUnit <= 0) {
+        final suggested = suggestedGramsPerUnit(widget.food);
+        if (suggested > 0) {
+          gramsPerUnitController.text = trimDouble(suggested);
+        }
+      }
+    });
+  }
+
+  void save() {
+    if (amount <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            amountMode == 'Quantity'
+                ? 'Enter a quantity greater than 0.'
+                : amountMode == 'Grams'
+                    ? 'Enter grams greater than 0.'
+                    : 'Enter a serving amount greater than 0.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (amountMode == 'Quantity' && gramsPerUnit <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Enter the weight of one item in grams so nutrition can be calculated accurately.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    final multiplier = nutritionMultiplier;
+    if (multiplier <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unable to calculate nutrition for this amount.'),
+        ),
+      );
+      return;
+    }
+
+    Navigator.pop(
+      context,
+      DietLogEntry(
+        id: widget.existingEntry?.id ??
+            DateTime.now().microsecondsSinceEpoch.toString(),
+        food: widget.food.copy(),
+        meal: meal,
+        dateTime: dateTime,
+        servings: multiplier,
+        quantity: amountMode == 'Servings' ? null : amount,
+        quantityUnit: amountMode == 'Servings'
+            ? null
+            : amountMode == 'Grams'
+                ? 'g'
+                : quantityUnit,
+        gramsPerUnit: amountMode == 'Quantity'
+            ? gramsPerUnit
+            : amountMode == 'Grams'
+                ? 1
+                : null,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final multiplier = nutritionMultiplier;
+    final calories = widget.food.calories * multiplier;
+    final protein = widget.food.protein * multiplier;
+    final carbs = widget.food.carbs * multiplier;
+    final fat = widget.food.fat * multiplier;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Food' : 'Add Food'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Text(
+            widget.food.name,
+            style: const TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          if (widget.food.brand.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              widget.food.brand,
+              style: const TextStyle(
+                color: Colors.grey,
+                fontSize: 16,
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF171B20),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              children: [
+                Text(
+                  '${calories.toStringAsFixed(0)} kcal',
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: NutritionNumber(
+                        label: 'Protein',
+                        value: '${protein.toStringAsFixed(1)} g',
+                      ),
+                    ),
+                    Expanded(
+                      child: NutritionNumber(
+                        label: 'Carbs',
+                        value: '${carbs.toStringAsFixed(1)} g',
+                      ),
+                    ),
+                    Expanded(
+                      child: NutritionNumber(
+                        label: 'Fat',
+                        value: '${fat.toStringAsFixed(1)} g',
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'How do you want to enter it?',
+            style: TextStyle(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 10),
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'Servings',
+                label: Text('Servings'),
+                icon: Icon(Icons.restaurant),
+              ),
+              ButtonSegment(
+                value: 'Quantity',
+                label: Text('Quantity'),
+                icon: Icon(Icons.numbers),
+              ),
+              ButtonSegment(
+                value: 'Grams',
+                label: Text('Grams'),
+                icon: Icon(Icons.scale_outlined),
+              ),
+            ],
+            selected: {amountMode},
+            onSelectionChanged: (selection) {
+              setMode(selection.first);
+            },
+          ),
+          const SizedBox(height: 18),
+          TextField(
+            controller: amountController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            onChanged: (_) => setState(() {}),
+            decoration: InputDecoration(
+              labelText: amountMode == 'Quantity'
+                  ? 'Quantity'
+                  : amountMode == 'Grams'
+                      ? 'Weight'
+                      : 'Servings',
+              suffixText: amountMode == 'Grams' ? 'g' : null,
+              helperText: amountMode == 'Servings'
+                  ? '1 serving = ${widget.food.servingLabel}'
+                  : null,
+            ),
+          ),
+          if (amountMode == 'Quantity') ...[
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: quantityUnits.contains(quantityUnit)
+                  ? quantityUnit
+                  : 'item',
+              decoration: const InputDecoration(
+                labelText: 'Unit',
+              ),
+              items: quantityUnits
+                  .map(
+                    (unit) => DropdownMenuItem(
+                      value: unit,
+                      child: Text(quantityUnitName(unit, 2)),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() {
+                  quantityUnit = value;
+
+                  final suggested = suggestedGramsForUnit(
+                    widget.food,
+                    value,
+                  );
+                  if (suggested > 0) {
+                    gramsPerUnitController.text = trimDouble(suggested);
+                  }
+                });
+              },
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: gramsPerUnitController,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: 'Weight of 1 $quantityUnit',
+                suffixText: 'g',
+                helperText:
+                    'Editable because item sizes vary by brand and food.',
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final value in amountMode == 'Quantity'
+                  ? [1.0, 2.0, 3.0, 4.0]
+                  : amountMode == 'Grams'
+                      ? [50.0, 100.0, 150.0, 200.0]
+                      : [0.5, 1.0, 1.5, 2.0])
+                ChoiceChip(
+                  label: Text(
+                    amountMode == 'Grams'
+                        ? '${trimDouble(value)} g'
+                        : trimDouble(value),
+                  ),
+                  selected: (amount - value).abs() < 0.0001,
+                  onSelected: (_) => setAmount(value),
+                ),
+            ],
+          ),
+          if (amountMode != 'Servings' && totalGrams > 0) ...[
+            const SizedBox(height: 14),
+            Text(
+              amountMode == 'Quantity'
+                  ? '${trimDouble(amount)} ${quantityUnitName(quantityUnit, amount)} ≈ ${trimDouble(totalGrams)} g total'
+                  : '${trimDouble(totalGrams)} g total',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+          const SizedBox(height: 20),
+          DropdownButtonFormField<String>(
+            value: meal,
+            decoration: const InputDecoration(labelText: 'Meal'),
+            items: const [
+              DropdownMenuItem(
+                value: 'Breakfast',
+                child: Text('Breakfast'),
+              ),
+              DropdownMenuItem(
+                value: 'Lunch',
+                child: Text('Lunch'),
+              ),
+              DropdownMenuItem(
+                value: 'Dinner',
+                child: Text('Dinner'),
+              ),
+              DropdownMenuItem(
+                value: 'Snacks',
+                child: Text('Snacks'),
+              ),
+            ],
+            onChanged: (value) {
+              if (value == null) return;
+              setState(() => meal = value);
+            },
+          ),
+          const SizedBox(height: 16),
+          ListTile(
+            tileColor: const Color(0xFF171B20),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+            ),
+            leading: const Icon(Icons.calendar_today),
+            title: const Text('Date'),
+            subtitle: Text(formatShortDate(dateTime)),
+            trailing: const Icon(Icons.edit_outlined),
+            onTap: chooseDate,
+          ),
+          const SizedBox(height: 24),
+          FilledButton.icon(
+            onPressed: save,
+            icon: Icon(isEditing ? Icons.check : Icons.add),
+            label: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Text(
+                isEditing ? 'Save Changes' : 'Add to Diary',
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            widget.food.source == 'Open Food Facts'
+                ? 'Source: Open Food Facts • database nutrition is based on ${widget.food.servingLabel}. Quantity conversions use the item weight shown above.'
+                : 'Custom food • nutrition is based on ${widget.food.servingLabel}.',
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Colors.grey,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// DIET - CREATE CUSTOM FOOD
+// ============================================================
+
+class CreateCustomFoodPage extends StatefulWidget {
+  const CreateCustomFoodPage({super.key});
+
+  @override
+  State<CreateCustomFoodPage> createState() =>
+      _CreateCustomFoodPageState();
+}
+
+class _CreateCustomFoodPageState extends State<CreateCustomFoodPage> {
+  final nameController = TextEditingController();
+  final brandController = TextEditingController();
+  final servingController = TextEditingController(text: '1 serving');
+  final servingWeightController = TextEditingController();
+  final caloriesController = TextEditingController();
+  final proteinController = TextEditingController();
+  final carbsController = TextEditingController();
+  final fatController = TextEditingController();
+
+  @override
+  void dispose() {
+    nameController.dispose();
+    brandController.dispose();
+    servingController.dispose();
+    servingWeightController.dispose();
+    caloriesController.dispose();
+    proteinController.dispose();
+    carbsController.dispose();
+    fatController.dispose();
+    super.dispose();
+  }
+
+  void save() {
+    final name = nameController.text.trim();
+    final serving = servingController.text.trim();
+    final servingWeightText = servingWeightController.text.trim();
+    final servingWeight = servingWeightText.isEmpty
+        ? null
+        : double.tryParse(servingWeightText);
+    final calories = double.tryParse(caloriesController.text);
+    final protein = double.tryParse(proteinController.text);
+    final carbs = double.tryParse(carbsController.text);
+    final fat = double.tryParse(fatController.text);
+
+    if (name.isEmpty ||
+        serving.isEmpty ||
+        calories == null ||
+        calories < 0 ||
+        protein == null ||
+        protein < 0 ||
+        carbs == null ||
+        carbs < 0 ||
+        fat == null ||
+        fat < 0 ||
+        (servingWeightText.isNotEmpty &&
+            (servingWeight == null || servingWeight <= 0))) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Fill in all nutrition fields with valid values. Serving weight can be left blank.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    Navigator.pop(
+      context,
+      FoodDefinition(
+        name: name,
+        brand: brandController.text.trim(),
+        servingLabel: serving,
+        calories: calories,
+        protein: protein,
+        carbs: carbs,
+        fat: fat,
+        source: 'Custom',
+        gramsPerServing: servingWeight,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Custom Food')),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          TextField(
+            controller: nameController,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Food name',
+              hintText: 'Protein Shake',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: brandController,
+            decoration: const InputDecoration(
+              labelText: 'Brand (optional)',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: servingController,
+            decoration: const InputDecoration(
+              labelText: 'Serving',
+              hintText: '1 scoop, 1 slice, 250 mL, 1 bar...',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: servingWeightController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Serving weight (optional)',
+              suffixText: 'g',
+              helperText:
+                  'Add this if you want Quantity/Grams logging for this custom food.',
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Nutrition per serving',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: caloriesController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Calories',
+              suffixText: 'kcal',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: proteinController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Protein',
+              suffixText: 'g',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: carbsController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Carbs',
+              suffixText: 'g',
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: fatController,
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+            ),
+            decoration: const InputDecoration(
+              labelText: 'Fat',
+              suffixText: 'g',
+            ),
+          ),
+          const SizedBox(height: 24),
+          FilledButton.icon(
+            onPressed: save,
+            icon: const Icon(Icons.save),
+            label: const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('Save Custom Food'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ============================================================
+// DIET WIDGETS
+// ============================================================
+
+class MacroProgressRow extends StatelessWidget {
+  const MacroProgressRow({
+    super.key,
+    required this.name,
+    required this.current,
+    required this.target,
+    required this.suffix,
+  });
+
+  final String name;
+  final double current;
+  final double target;
+  final String suffix;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 70,
+          child: Text(
+            name,
+            style: const TextStyle(
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Expanded(
+          child: LinearProgressIndicator(
+            value:
+                progressValue(current, target),
+            minHeight: 7,
+            borderRadius:
+                BorderRadius.circular(20),
+            backgroundColor:
+                Colors.white.withOpacity(0.08),
+          ),
+        ),
+        const SizedBox(width: 12),
+        SizedBox(
+          width: 100,
+          child: Text(
+            '${current.toStringAsFixed(0)} / ${target.toStringAsFixed(0)} $suffix',
+            textAlign: TextAlign.right,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class NutritionNumber extends StatelessWidget {
+  const NutritionNumber({
+    super.key,
+    required this.label,
+    required this.value,
+  });
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.grey,
+            fontSize: 12,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 
 // ============================================================
 // SETTINGS
@@ -2760,6 +5495,282 @@ class ProgressStatCard
       ),
     );
   }
+}
+
+
+double progressValue(
+  double current,
+  double target,
+) {
+  if (target <= 0) return 0;
+
+  return (current / target)
+      .clamp(0.0, 1.0)
+      .toDouble();
+}
+
+bool sameCalendarDay(
+  DateTime a,
+  DateTime b,
+) {
+  return a.year == b.year &&
+      a.month == b.month &&
+      a.day == b.day;
+}
+
+String dietDateLabel(DateTime date) {
+  final now = DateTime.now();
+  final today = DateTime(
+    now.year,
+    now.month,
+    now.day,
+  );
+  final selected = DateTime(
+    date.year,
+    date.month,
+    date.day,
+  );
+
+  if (selected == today) {
+    return 'Today • ${formatShortDate(date)}';
+  }
+
+  if (selected ==
+      today.subtract(
+        const Duration(days: 1),
+      )) {
+    return 'Yesterday • ${formatShortDate(date)}';
+  }
+
+  if (selected ==
+      today.add(
+        const Duration(days: 1),
+      )) {
+    return 'Tomorrow • ${formatShortDate(date)}';
+  }
+
+  return formatShortDate(date);
+}
+
+String trimDouble(double value) {
+  if (value == value.roundToDouble()) {
+    return value.toStringAsFixed(0);
+  }
+
+  return value.toStringAsFixed(2).replaceFirst(
+        RegExp(r'0+$'),
+        '',
+      );
+}
+
+double? gramsFromServingLabel(String label) {
+  final match = RegExp(
+    r'([0-9]+(?:\.[0-9]+)?)\s*g\b',
+    caseSensitive: false,
+  ).firstMatch(label);
+
+  if (match == null) return null;
+  return double.tryParse(match.group(1) ?? '');
+}
+
+String foodEntrySubtitle(DietLogEntry entry) {
+  String amountText;
+
+  if (entry.quantity != null && entry.quantityUnit != null) {
+    final unit = quantityUnitName(entry.quantityUnit!, entry.quantity!);
+    amountText = '${trimDouble(entry.quantity!)} $unit';
+
+    if (entry.quantityUnit != 'g' &&
+        entry.gramsPerUnit != null &&
+        entry.gramsPerUnit! > 0) {
+      final grams = entry.quantity! * entry.gramsPerUnit!;
+      amountText += ' • ${trimDouble(grams)} g';
+    }
+  } else {
+    amountText =
+        '${trimDouble(entry.servings)} × ${entry.food.servingLabel}';
+  }
+
+  final macroText =
+      'P ${entry.protein.toStringAsFixed(1)}g • C ${entry.carbs.toStringAsFixed(1)}g • F ${entry.fat.toStringAsFixed(1)}g';
+
+  if (entry.food.brand.isEmpty) {
+    return '$amountText\n$macroText';
+  }
+
+  return '${entry.food.brand} • $amountText\n$macroText';
+}
+
+String quantityUnitName(String unit, double quantity) {
+  final plural = quantity.abs() != 1;
+
+  switch (unit) {
+    case 'item':
+      return plural ? 'items' : 'item';
+    case 'egg':
+      return plural ? 'eggs' : 'egg';
+    case 'slice':
+      return plural ? 'slices' : 'slice';
+    case 'piece':
+      return plural ? 'pieces' : 'piece';
+    case 'bar':
+      return plural ? 'bars' : 'bar';
+    case 'scoop':
+      return plural ? 'scoops' : 'scoop';
+    case 'bottle':
+      return plural ? 'bottles' : 'bottle';
+    case 'can':
+      return plural ? 'cans' : 'can';
+    case 'packet':
+      return plural ? 'packets' : 'packet';
+    case 'cup':
+      return plural ? 'cups' : 'cup';
+    case 'tbsp':
+      return 'tbsp';
+    case 'tsp':
+      return 'tsp';
+    case 'oz':
+      return 'oz';
+    case 'mL':
+      return 'mL';
+    case 'g':
+      return 'g';
+    default:
+      return unit;
+  }
+}
+
+String? suggestedQuantityUnit(FoodDefinition food) {
+  if (food.gramsPerServing == null || food.gramsPerServing! <= 0) {
+    return null;
+  }
+
+  final name = food.name.toLowerCase();
+  final serving = food.servingLabel.toLowerCase();
+
+  if (RegExp(r'\beggs?\b').hasMatch(name) ||
+      RegExp(r'\beggs?\b').hasMatch(serving)) {
+    return 'egg';
+  }
+  if (serving.contains('slice')) return 'slice';
+  if (serving.contains('piece')) return 'piece';
+  if (serving.contains('bar')) return 'bar';
+  if (serving.contains('scoop')) return 'scoop';
+  if (serving.contains('bottle')) return 'bottle';
+  if (RegExp(r'\bcan\b').hasMatch(serving)) return 'can';
+  if (serving.contains('packet')) return 'packet';
+  if (name.contains('banana')) return 'item';
+  if (RegExp(r'\bapple\b').hasMatch(name)) return 'item';
+  if (RegExp(r'\borange\b').hasMatch(name)) return 'item';
+
+  return null;
+}
+
+double suggestedGramsPerUnit(FoodDefinition food) {
+  final unit = suggestedQuantityUnit(food) ?? 'item';
+  return suggestedGramsForUnit(food, unit);
+}
+
+double suggestedGramsForUnit(FoodDefinition food, String unit) {
+  final name = food.name.toLowerCase();
+
+  final serving = food.servingLabel.toLowerCase();
+  final baseGrams = food.gramsPerServing;
+
+  if (baseGrams != null && baseGrams > 0) {
+    final matchesServingUnit =
+        (unit == 'egg' && RegExp(r'\beggs?\b').hasMatch(serving)) ||
+        (unit == 'slice' && serving.contains('slice')) ||
+        (unit == 'piece' && serving.contains('piece')) ||
+        (unit == 'bar' && serving.contains('bar')) ||
+        (unit == 'scoop' && serving.contains('scoop')) ||
+        (unit == 'bottle' && serving.contains('bottle')) ||
+        (unit == 'can' && RegExp(r'\bcan\b').hasMatch(serving)) ||
+        (unit == 'packet' && serving.contains('packet'));
+
+    if (matchesServingUnit) return baseGrams;
+  }
+
+  if (unit == 'egg') return 50;
+  if (unit == 'oz') return 28.3495;
+
+  // These volume conversions are only starting points. The amount stays
+  // editable because food density and product size can vary.
+  if (unit == 'tbsp') return 15;
+  if (unit == 'tsp') return 5;
+  if (unit == 'mL') return 1;
+  if (unit == 'cup') return 240;
+
+  if (unit == 'item') {
+    if (name.contains('banana')) return 118;
+    if (RegExp(r'\bapple\b').hasMatch(name)) return 182;
+    if (RegExp(r'\borange\b').hasMatch(name)) return 131;
+  }
+
+  return 0;
+}
+
+// ============================================================
+// CONFIRMATION / TIMER HELPERS
+// ============================================================
+
+Future<bool> confirmDelete(
+  BuildContext context, {
+  required String title,
+  required String message,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        backgroundColor: const Color(0xFF171B20),
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context, false);
+            },
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              Navigator.pop(context, true);
+            },
+            child: const Text('Delete'),
+          ),
+        ],
+      );
+    },
+  );
+
+  return result ?? false;
+}
+
+String formatDurationSeconds(int totalSeconds) {
+  if (totalSeconds < 60) {
+    return '${totalSeconds}s';
+  }
+
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
+
+  if (seconds == 0) {
+    return '${minutes}m';
+  }
+
+  return '${minutes}m ${seconds}s';
+}
+
+String formatStopwatch(int totalSeconds) {
+  final minutes = totalSeconds ~/ 60;
+  final seconds = totalSeconds % 60;
+
+  return "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
 }
 
 // ============================================================
